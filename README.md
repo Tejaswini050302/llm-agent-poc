@@ -11,7 +11,3 @@ This repo is a **proof-of-concept (POC)** LLM-powered agent that runs fully in t
   2. **AI Pipe API** (via proxy)
   3. **JS Code Execution** (sandboxed iframe)
 
-## 📂 File Structure
-├── index.html # Core browser app
-├── server.js # Optional proxy for Google Search + AI Pipe
-└── README.md
