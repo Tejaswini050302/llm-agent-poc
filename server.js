@@ -1,45 +1,38 @@
-// server.js
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(express.json());
 
-// Google Search proxy (example uses SerpAPI)
-app.get("/api/search", async (req, res) => {
-  const q = req.query.q;
-  try {
-    const r = await fetch(
-      `https://serpapi.com/search.json?q=${encodeURIComponent(q)}&api_key=${process.env.SERPAPI_KEY}`
-    );
-    const j = await r.json();
-    const snippets = (j.organic_results || []).map(r => ({
-      title: r.title,
-      snippet: r.snippet,
-      link: r.link
-    }));
-    res.json({ snippets });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+app.post("/ask", async (req, res) => {
+  const { question } = req.body;
 
-// AI Pipe proxy
-app.post("/api/aipipe", async (req, res) => {
   try {
-    const r = await fetch(process.env.AIPIPE_URL, {
+    const response = await fetch(`${process.env.AIPROXY_URL}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body)
+      headers: {
+        "Authorization": `Bearer ${process.env.AIPROXY_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: question }]
+      })
     });
-    const j = await r.json();
-    res.json(j);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    const data = await response.json();
+    res.json({ answer: data.choices[0].message.content });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong." });
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Proxy running on http://localhost:${port}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
+});
