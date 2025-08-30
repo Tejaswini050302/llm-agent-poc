@@ -1,0 +1,263 @@
+<!--
+LLM Agent POC - single-file browser app
+Files contained here:
+  - index.html  (this file)
+
+How to use:
+  1. Create a GitHub repo, add this file as index.html in repo root.
+  2. Push to GitHub. The repo URL will be https://github.com/<your-username>/<repo-name>
+  3. (Optional) Enable GitHub Pages from the repo settings to host a live demo.
+
+Notes / TODOs (placeholders you must fill):
+  - Replace OPENAI_API_ENDPOINT / OPENAI_API_KEY with your LLM provider or proxy (bootstrap-llm-provider integration expected in production).
+  - Provide a real Google Search snippet API endpoint (or use SerpAPI / Custom Search JSON API) and set SEARCH_API_ENDPOINT.
+  - AI Pipe proxy endpoint: set AIPIPE_PROXY.
+
+This file implements:
+  - Minimal UI (Bootstrap) with model picker
+  - Looping agent logic: sends conversation to LLM, reads OpenAI-style function calls and executes tools
+  - Tools: search (calls SEARCH_API_ENDPOINT), aipipe (calls AIPIPE_PROXY), js_exec (runs code in a sandboxed iframe)
+  - Alert UI for errors
+
+Keep it minimal and hackable.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LLM Agent POC</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 18px; }
+    #convo { height: 55vh; overflow:auto; background:#f8f9fa; padding:12px; border-radius:8px }
+    .msg { margin-bottom:8px }
+    pre { white-space:pre-wrap }
+    iframe#sandbox { width:100%; height:160px; border:1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h3>LLM Agent POC — Browser Multi-Tool Reasoning</h3>
+
+    <div id="alert-area"></div>
+
+    <div class="row g-2 align-items-center mb-2">
+      <div class="col-auto">
+        <label class="form-label">Model</label>
+        <select id="model" class="form-select">
+          <option value="gpt-4o-mini">gpt-4o-mini (example)</option>
+          <option value="gpt-4o">gpt-4o</option>
+          <option value="gpt-4">gpt-4</option>
+        </select>
+      </div>
+      <div class="col">
+        <label class="form-label">API Endpoint</label>
+        <input id="api-endpoint" class="form-control" placeholder="https://your-llm-proxy.example/v1/chat/completions">
+      </div>
+      <div class="col-3">
+        <label class="form-label">API Key</label>
+        <input id="api-key" class="form-control" placeholder="(or leave blank for proxy)"/>
+      </div>
+    </div>
+
+    <div id="convo" class="mb-2"></div>
+
+    <div class="input-group mb-3">
+      <input id="user-input" class="form-control" placeholder="Type a user message (eg 'Write a blog post about IBM')">
+      <button id="send" class="btn btn-primary">Send</button>
+    </div>
+
+    <details class="mb-3">
+      <summary>Advanced / debug</summary>
+      <div class="mb-2">
+        <label class="form-label">Search API Endpoint (for Google snippets)</label>
+        <input id="search-endpoint" class="form-control" placeholder="/api/search or https://serpapi.example">
+      </div>
+      <div class="mb-2">
+        <label class="form-label">AI Pipe Proxy</label>
+        <input id="aipipe-endpoint" class="form-control" placeholder="https://aiproxy.example/v1/pipe">
+      </div>
+    </details>
+
+    <h5>JS Execution Sandbox (for js_exec tool)</h5>
+    <iframe id="sandbox" sandbox="allow-scripts"></iframe>
+
+  </div>
+
+<script>
+// Simple helper UI functions
+function alertShow(type, html) {
+  const a = document.createElement('div');
+  a.className = `alert alert-${type} alert-dismissible`;
+  a.innerHTML = html + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+  document.getElementById('alert-area').appendChild(a);
+}
+
+function appendConvo(who, content) {
+  const c = document.createElement('div');
+  c.className = 'msg';
+  c.innerHTML = `<strong>${who}:</strong> <div><pre>${escapeHtml(content)}</pre></div>`;
+  const conv = document.getElementById('convo');
+  conv.appendChild(c);
+  conv.scrollTop = conv.scrollHeight;
+}
+function escapeHtml(s){ return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Sandboxed JS runner using iframe postMessage
+const sandbox = document.getElementById('sandbox');
+const sandboxDoc = `<!doctype html><html><body><div id=out></div><script>window.addEventListener('message', async e=>{ try{ const code = e.data.code; const consoleOut = []; const consoleProxy = { log: (...args)=>consoleOut.push(args.map(a=>String(a)).join(' ')) };
+  // run code in Function to reduce access to parent
+  const fn = new Function('console', code);
+  await fn(consoleProxy);
+  parent.postMessage({type:'js_exec_result', ok:true, out:consoleOut.join('\n')}, '*');
+ } catch(err){ parent.postMessage({type:'js_exec_result', ok:false, err:String(err)}, '*'); }});</script></body></html>`;
+const blob = new Blob([sandboxDoc], {type:'text/html'});
+sandbox.src = URL.createObjectURL(blob);
+
+window.addEventListener('message', (ev)=>{
+  if(ev.data && ev.data.type === 'js_exec_result'){
+    if(ev.data.ok) appendConvo('tool:js_exec', ev.data.out || '(no output)');
+    else alertShow('danger', 'JS sandbox error: '+escapeHtml(ev.data.err));
+  }
+});
+
+// Tool implementations
+async function tool_search(query){
+  const endpoint = document.getElementById('search-endpoint').value || '/api/search';
+  try{
+    const res = await fetch(endpoint + '?q=' + encodeURIComponent(query));
+    if(!res.ok) throw new Error('Search API returned '+res.status);
+    const j = await res.json();
+    // expect {snippets: [{title, snippet, link}, ...]}
+    return JSON.stringify(j, null, 2);
+  }catch(e){ throw new Error('Search failed: '+e.message); }
+}
+
+async function tool_aipipe(payload){
+  const endpoint = document.getElementById('aipipe-endpoint').value || '/api/aipipe';
+  try{
+    const res = await fetch(endpoint, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error('AI Pipe returned '+res.status);
+    const j = await res.json();
+    return JSON.stringify(j, null, 2);
+  }catch(e){ throw new Error('AIPipe failed: '+e.message); }
+}
+
+async function tool_js_exec(code){
+  // post to iframe
+  sandbox.contentWindow.postMessage({code}, '*');
+  // result arrives via message listener
+  return '(executing in sandbox — output will appear)';
+}
+
+// LLM call — expects OpenAI-style function-calling output
+async function callLLM(messages){
+  const apiEndpoint = document.getElementById('api-endpoint').value.trim();
+  const apiKey = document.getElementById('api-key').value.trim();
+  if(!apiEndpoint){ alertShow('warning', 'Please set an API endpoint in the Model section (or use a proxy)'); }
+
+  // build request in a minimal OpenAI Chat Completions v1 style
+  const body = {
+    model: document.getElementById('model').value,
+    messages: messages,
+    temperature: 0.2,
+    // allow function calling — the LLM can return a function_call
+    functions: [
+      {name:'search', description:'Search the web and return snippets', parameters:{type:'object', properties:{q:{type:'string'}}, required:['q']}},
+      {name:'aipipe', description:'Call an AI Pipe workflow', parameters:{type:'object', properties:{payload:{type:'object'}}}},
+      {name:'js_exec', description:'Execute JS in a sandbox', parameters:{type:'object', properties:{code:{type:'string'}}}}
+    ],
+    function_call: 'auto'
+  };
+
+  const headers = {'Content-Type':'application/json'};
+  if(apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+
+  const res = await fetch(apiEndpoint, {method:'POST', headers, body: JSON.stringify(body)});
+  if(!res.ok) throw new Error('LLM proxy error ' + res.status);
+  const j = await res.json();
+  // support multiple response shapes
+  const message = j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message : j;
+  return message;
+}
+
+// Agent loop
+let convo = []; // OpenAI-style messages
+let running = false;
+
+async function handleToolCall(funcName, args){
+  try{
+    if(funcName === 'search'){
+      appendConvo('tool:call', `search(${args.q})`);
+      const r = await tool_search(args.q);
+      appendConvo('tool:search', r);
+      return {role:'tool', name:'search', content: r};
+    }
+    if(funcName === 'aipipe'){
+      appendConvo('tool:call', `aipipe(${JSON.stringify(args).slice(0,200)})`);
+      const r = await tool_aipipe(args.payload || {});
+      appendConvo('tool:aipipe', r);
+      return {role:'tool', name:'aipipe', content: r};
+    }
+    if(funcName === 'js_exec'){
+      appendConvo('tool:call', `js_exec(code...)`);
+      const r = await tool_js_exec(args.code || '');
+      return {role:'tool', name:'js_exec', content: r};
+    }
+    throw new Error('Unknown tool '+funcName);
+  }catch(e){
+    alertShow('danger', 'Tool error: '+escapeHtml(e.message));
+    return {role:'tool', name:funcName, content: 'ERROR: '+String(e)};
+  }
+}
+
+async function agentStep(){
+  if(running) return; running = true;
+  try{
+    const llmMsg = await callLLM(convo);
+    // print assistant text part if exists
+    if(llmMsg.content) appendConvo('assistant', llmMsg.content || '');
+    // check function_call
+    if(llmMsg.function_call){
+      const fc = llmMsg.function_call;
+      // function_call may be object or string
+      let fnName = fc.name;
+      let fnArgs = {};
+      try{ fnArgs = typeof fc.arguments === 'string' ? JSON.parse(fc.arguments) : (fc.arguments || {}); }catch(e){ fnArgs = {}; }
+      // allow multiple tool calls in sequence by looping until no more function_call
+      const toolResult = await handleToolCall(fnName, fnArgs);
+      // add tool result to convo and immediately loop to LLM with the tool output
+      convo.push(toolResult);
+      // continue the loop automatically
+      await agentStep();
+    } else {
+      // no tool call — done for now
+      // await user to type next message
+    }
+  } catch(e){
+    alertShow('danger', 'Agent error: '+escapeHtml(String(e)));
+  } finally{ running = false; }
+}
+
+// UI handlers
+document.getElementById('send').addEventListener('click', async ()=>{
+  const input = document.getElementById('user-input').value.trim();
+  if(!input) return;
+  appendConvo('user', input);
+  convo.push({role:'user', content: input});
+  document.getElementById('user-input').value = '';
+  // kick the agent loop
+  await agentStep();
+});
+
+// keyboard Enter
+document.getElementById('user-input').addEventListener('keydown', (e)=>{ if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); document.getElementById('send').click(); }});
+
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
